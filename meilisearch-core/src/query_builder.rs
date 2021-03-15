@@ -1314,24 +1314,28 @@ mod tests {
     #[test]
     fn simple_concatenation() {
         let store = TempDatabase::from_iter(vec![
-            ("iphone", &[doc_index(0, 0)][..]),
-            ("case", &[doc_index(0, 1)][..]),
+            ("iphone", &[DocIndex{document_id: DocumentId(1), attribute: 6, word_index: 1, char_index: 1, char_length: 1}][..]),
+            ("case", &[DocIndex{document_id: DocumentId(1), attribute: 6, word_index: 1, char_index: 1, char_length: 1}][..]),
+            ("number", &[DocIndex{document_id: DocumentId(1), attribute: 6, word_index: 1, char_index: 1, char_length: 1}][..])
         ]);
 
         let db = &store.database;
         let reader = db.main_read_txn().unwrap();
 
         let builder = store.query_builder();
-        let SortResult { documents, .. } = builder.query(&reader, Some("i phone case"), 0..20).unwrap();
+        let SortResult { documents, .. } = builder.query(&reader, Some("i phone case number"), 0..20).unwrap();
         let mut iter = documents.into_iter();
 
-        assert_matches!(iter.next(), Some(Document { id: DocumentId(0), matches, .. }) => {
+        assert_matches!(iter.next(), Some(Document { id: DocumentId(1), matches, .. }) => {
             let mut iter = matches.into_iter();
-            assert_matches!(iter.next(), Some(SimpleMatch { query_index: 0, word_index: 0, distance: 0, .. })); // iphone
+            for i in 0..5 {
+                println!("{}", iter.next().unwrap().attribute);
+            }
+/*             assert_matches!(iter.next(), Some(SimpleMatch { query_index: 0, word_index: 0, distance: 0, .. })); // iphone
             assert_matches!(iter.next(), Some(SimpleMatch { query_index: 1, word_index: 1, distance: 0, .. })); // iphone
             // assert_matches!(iter.next(), Some(SimpleMatch { query_index: 1, word_index: 0, distance: 1, .. })); "phone"
             //                                                                        but no typo on first letter  ^^^^^^^
-            assert_matches!(iter.next(), Some(SimpleMatch { query_index: 2, word_index: 2, distance: 0, .. })); // case
+            assert_matches!(iter.next(), Some(SimpleMatch { query_index: 2, word_index: 2, distance: 0, .. })); // case */
             assert_matches!(iter.next(), None);
         });
         assert_matches!(iter.next(), None);

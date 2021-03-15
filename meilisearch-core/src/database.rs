@@ -1,4 +1,4 @@
-use std::collections::hash_map::{Entry, HashMap};
+use std::{collections::hash_map::{Entry, HashMap}, str::from_utf8};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
@@ -51,8 +51,8 @@ pub struct DatabaseOptions {
 impl Default for DatabaseOptions {
     fn default() -> DatabaseOptions {
         DatabaseOptions {
-            main_map_size: 100 * 1024 * 1024 * 1024, //100Gb
-            update_map_size: 100 * 1024 * 1024 * 1024, //100Gb
+            main_map_size: 3 * 1024 * 1024 * 1024, //3Gb
+            update_map_size: 3 * 1024 * 1024 * 1024, //3Gb
         }
     }
 }
@@ -570,6 +570,45 @@ impl Database {
             .put_fields_distribution(writer, &frequency)
     }
 
+    
+    pub fn group_by_sum(&self, writer: &mut MainWriter, index_uid: &str, sum_field: &str) -> MResult<()> {
+        let index = match self.open_index(&index_uid) {
+            Some(index) => index,
+            None => {
+                error!("Impossible to retrieve index {}", index_uid);
+                return Ok(());
+            }
+        };
+
+        let schema = match index.main.schema(&writer)? {
+            Some(schema) => schema,
+            None => return Ok(()),
+        };
+
+        let all_documents_fields = index
+            .documents_fields_counts
+            .all_documents_fields_counts(&writer)?;
+
+        // group fields values
+        let mut groups = BTreeMap::<String, f32>::new();
+        for result in all_documents_fields {
+            let (document_id, attr, _) = result?;
+            if let Some(field_id) = schema.indexed_pos_to_field_id(attr) {
+                // TODO: deal with unwrap()
+                let name = schema.name(field_id).unwrap();
+                if name == sum_field {
+                    let field_str = from_utf8(index.documents_fields.document_attribute(writer, document_id, field_id).unwrap().unwrap()).unwrap();
+                    *groups.entry("sum".to_owned()).or_default() += field_str.parse::<f32>().unwrap();
+                    
+                }
+            }
+        }
+
+        index
+            .main
+            .put_group_by(writer, &groups)
+    }
+
     pub fn version(&self) -> (u32, u32, u32) { self.database_version }
 }
 
@@ -582,7 +621,7 @@ mod tests {
     use crate::update::{ProcessedUpdateResult, UpdateStatus};
     use crate::settings::Settings;
     use crate::{Document, DocumentId};
-    use serde::de::IgnoredAny;
+    use serde::{Serialize, de::IgnoredAny};
     use std::sync::mpsc;
 
     #[test]
@@ -1298,5 +1337,105 @@ mod tests {
             })
         );
         assert_matches!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_group_by() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let database = Database::open_or_create(dir.path(), DatabaseOptions::default()).unwrap();
+        let db = &database;
+
+        let (sender, receiver) = mpsc::sync_channel(100);
+        let update_fn = move |_name: &str, update: ProcessedUpdateResult| {
+            sender.send(update.update_id).unwrap()
+        };
+        let index = database.create_index("test").unwrap();
+
+        database.set_update_callback(Box::new(update_fn));
+
+        let mut writer = db.main_write_txn().unwrap();
+        index.main.put_schema(&mut writer, &Schema::with_primary_key("id")).unwrap();
+        writer.commit().unwrap();
+
+        let settings = {
+            let data = r#"
+                {
+                    "searchableAttributes": ["name", "description", "wage", "salary"],
+                    "displayedAttributes": ["name", "description", "wage", "salary"]
+                }
+            "#;
+            let settings: Settings = serde_json::from_str(data).unwrap();
+            settings.to_update().unwrap()
+        };
+
+        let mut writer = db.update_write_txn().unwrap();
+        let _update_id = index.settings_update(&mut writer, settings).unwrap();
+        writer.commit().unwrap();
+
+        let mut additions = index.documents_addition();
+
+        // DocumentId(7900334843754999545)
+        let doc1 = serde_json::json!({
+            "id": 123,
+            "name": "Marvin",
+            "description": "My name is Marvin",
+            "wage": 1000.0,
+            "salary": 365000,
+        });
+
+        // DocumentId(8367468610878465872)
+        let doc2 = serde_json::json!({
+            "id": 234,
+            "name": "Kevin",
+            "description": "My name is Kevin",
+            "wage": 3000.0,
+            "salary": 900000,
+        });
+
+        let doc3 = serde_json::json!({
+            "id": 345,
+            "name": "Brian",
+            "description": "My name is not Brian. Joking.",
+            "wage": 700.0,
+            "salary": 78956,
+        });
+
+        additions.update_document(doc1);
+        additions.update_document(doc2);
+        additions.update_document(doc3);
+
+        let mut writer = db.update_write_txn().unwrap();
+        let update_id = additions.finalize(&mut writer).unwrap();
+        writer.commit().unwrap();
+
+        // block until the transaction is processed
+        let _ = receiver.into_iter().find(|id| *id == update_id);
+
+        let update_reader = db.update_read_txn().unwrap();
+        let result = index.update_status(&update_reader, update_id).unwrap();
+        assert_matches!(result, Some(UpdateStatus::Processed { content }) if content.error.is_none());
+        update_reader.abort().unwrap();
+/* 
+        let reader = db.main_read_txn().unwrap();
+        let document: Option<IgnoredAny> = index.document(&reader, None, DocumentId(25)).unwrap();
+        assert!(document.is_none());
+
+        let document: Option<IgnoredAny> = index
+            .document(&reader, None, DocumentId(0))
+            .unwrap();
+        assert!(document.is_some());
+
+        let document: Option<IgnoredAny> = index
+            .document(&reader, None, DocumentId(1))
+            .unwrap();
+        assert!(document.is_some()); */
+
+        let mut writer = db.main_write_txn().unwrap();
+        let index = db.open_index("test").unwrap();
+        db.group_by_sum(&mut writer, "test", "wage").unwrap();
+        let groups = index.main.group_by(&writer).unwrap().unwrap();
+        assert!(groups["sum"] == 4700.0);
+        println!("{:?}", groups);
     }
 }

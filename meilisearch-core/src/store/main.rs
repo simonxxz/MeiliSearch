@@ -30,10 +30,14 @@ const STOP_WORDS_KEY: &str = "stop-words";
 const SYNONYMS_KEY: &str = "synonyms";
 const UPDATED_AT_KEY: &str = "updated-at";
 const WORDS_KEY: &str = "words";
+const GROUP_BY: &str = "group-by";
 
 pub type FreqsMap = BTreeMap<String, usize>;
 type SerdeFreqsMap = SerdeBincode<FreqsMap>;
 type SerdeDatetime = SerdeBincode<DateTime<Utc>>;
+
+pub type GroupMap = BTreeMap<String, f32>;
+type SerdeGroupMap = SerdeBincode<GroupMap>;
 
 #[derive(Copy, Clone)]
 pub struct Main {
@@ -267,6 +271,24 @@ impl Main {
             .get::<_, Str, SerdeFreqsMap>(reader, FIELDS_DISTRIBUTION_KEY)?
         {
             Some(freqs) => Ok(Some(freqs)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn put_group_by(
+        self, 
+        writer: &mut heed::RwTxn<MainT>,
+        group_by: &GroupMap,
+    ) -> MResult<()> {
+        Ok(self.main.put::<_, Str, SerdeGroupMap>(writer, GROUP_BY, group_by)?)
+    }
+
+    pub fn group_by(&self, reader: &heed::RoTxn<MainT>) -> MResult<Option<GroupMap>> {
+        match self
+            .main
+            .get::<_, Str, SerdeGroupMap>(reader, GROUP_BY)?
+        {
+            Some(group_by) => Ok(Some(group_by)),
             None => Ok(None),
         }
     }
